@@ -25,6 +25,7 @@
     <preference name="GradlePluginKotlinVersion" value="1.9.24"/>
     <preference name="GradleVersion" value="8.13" />
     <preference name="AndroidGradlePluginVersion" value="8.7.3" />
+    <hook type="after_prepare" src="hooks/after_prepare/extend_file_provider.js" />
     <feature name="StatusBar">
         <param name="ios-package" onload="true" value="CDVStatusBar" />
     </feature>
