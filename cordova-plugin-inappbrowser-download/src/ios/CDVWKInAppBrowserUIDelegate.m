@@ -114,6 +114,14 @@
     [[self getViewController] presentViewController:alert animated:YES completion:nil];
 }
 
+// Add window.open() handling to re-route back to original webView just like in android
+- (WKWebView *)webView:(WKWebView *)webView createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration forNavigationAction:(WKNavigationAction *)navigationAction windowFeatures:(WKWindowFeatures *)windowFeatures
+{
+    [self.webView loadRequest:navigationAction.request];
+    
+    return nil;
+}
+
 -(UIViewController*) getViewController
 {
     return _viewController;

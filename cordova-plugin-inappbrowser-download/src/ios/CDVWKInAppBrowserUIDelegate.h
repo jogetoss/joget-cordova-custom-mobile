@@ -25,6 +25,7 @@
 }
 
 @property (nonatomic, copy) NSString* title;
+@property (nonatomic, strong) WKWebView* webView;
 
 - (instancetype)initWithTitle:(NSString*)title;
 -(void) setViewController:(UIViewController*) viewController;
