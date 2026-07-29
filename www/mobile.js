@@ -623,9 +623,15 @@ var MobileApp = {
         });
 
         // init geolocation permission
-        if (MobileApp.geolocation && navigator.geolocation) {
-            navigator.geolocation.getCurrentPosition(function(position) { console.log(position) });
-            console.log("Geolocation initialized");
+        if (navigator.geolocation) {
+            MobileApp.requestLocationPermission(function(granted) {
+                if (granted) {
+                    navigator.geolocation.getCurrentPosition(function(position) { console.log(position) });
+                    console.log("Geolocation initialized");
+                } else {
+                    console.log("Geolocation permission denied");
+                }
+            });
         }
     },
 
@@ -679,13 +685,53 @@ var MobileApp = {
         $("#loading").removeClass("d-flex");
     },
 
+    requestLocationPermission: function(callback) {
+        console.log("requestLocationPermission called");
+        if (typeof cordova !== "undefined" && cordova.plugins && cordova.plugins.permissions) {
+            var permissions = cordova.plugins.permissions;
+            console.log("cordova.plugins.permissions available");
+            permissions.checkPermission(permissions.ACCESS_FINE_LOCATION, function(status) {
+                console.log("Permission check status: " + status.hasPermission);
+                if (status.hasPermission) {
+                    console.log("Permission already granted");
+                    callback(true);
+                } else {
+                    console.log("Requesting permission...");
+                    permissions.requestPermission(permissions.ACCESS_FINE_LOCATION, function(status) {
+                        console.log("Permission request status: " + status.hasPermission);
+                        if (status.hasPermission) {
+                            callback(true);
+                        } else {
+                            callback(false);
+                        }
+                    }, function(error) {
+                        console.log("Location permission request error: " + error);
+                        callback(false);
+                    });
+                }
+            }, function(error) {
+                console.log("Location permission check error: " + error);
+                callback(false);
+            });
+        } else {
+            console.log("cordova.plugins.permissions not available, proceeding without permission request");
+            callback(true);
+        }
+    },
+
     cordovaAction: function(action, message, params) {
         console.log("action: " + params.data.action);
         if (action === "close") {
             MobileApp.inAppBrowser.close();
         } else if (action === "geolocation") {
-            navigator.geolocation.getCurrentPosition(function(position) { 
-                console.log(position) 
+            MobileApp.requestLocationPermission(function(granted) {
+                if (granted) {
+                    navigator.geolocation.getCurrentPosition(function(position) { 
+                        console.log(position) 
+                    });
+                } else {
+                    console.log("Geolocation permission denied");
+                } 
             });
         } else if (action === "vibration") {
             navigator.vibrate(1000);
