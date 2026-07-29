@@ -27,6 +27,10 @@
 
 #import <Cordova/CDVPluginResult.h>
 
+// Download support imports
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+
 #define    kInAppBrowserTargetSelf @"_self"
 #define    kInAppBrowserTargetSystem @"_system"
 #define    kInAppBrowserTargetBlank @"_blank"
@@ -39,6 +43,47 @@
 #define    TOOLBAR_HEIGHT 44.0
 #define    LOCATIONBAR_HEIGHT 0.0
 #define    FOOTER_HEIGHT ((TOOLBAR_HEIGHT) + (LOCATIONBAR_HEIGHT))
+
+// Hooks URL.createObjectURL so that the real Blob object (e.g. a client-generated
+// jsPDF/File Saver blob) can be recovered later when the WebView is asked to navigate
+// to the resulting blob: URL - mirrors InAppBrowserDownloads.java's getBlobHookJavaScript()
+// on Android, which is why this JS is identical in shape to that one.
+#define    JOGET_BLOB_HOOK_JS @"(function() {" \
+    "  if (window.__jogetBlobHookInstalled) { return; }" \
+    "  window.__jogetBlobHookInstalled = true;" \
+    "  window.__jogetBlobStore = window.__jogetBlobStore || {};" \
+    "  window.__jogetBlobFilenames = window.__jogetBlobFilenames || {};" \
+    "  var originalCreateObjectURL = URL.createObjectURL;" \
+    "  URL.createObjectURL = function(blob) {" \
+    "    var id = 'blob_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);" \
+    "    window.__jogetBlobStore[id] = blob;" \
+    "    var originalUrl = originalCreateObjectURL(blob);" \
+    "    window.__jogetBlobStore[originalUrl] = id;" \
+    "    return originalUrl;" \
+    "  };" \
+    "  function jogetRecordAnchorDownload(el) {" \
+    "    if (el && el.tagName === 'A' && el.download && el.href && el.href.indexOf('blob:') === 0) {" \
+    "      window.__jogetBlobFilenames[el.href] = el.download;" \
+    "    }" \
+    "  }" \
+    "  document.addEventListener('click', function(e) {" \
+    "    var el = e.target;" \
+    "    while (el && el.tagName !== 'A') { el = el.parentElement; }" \
+    "    jogetRecordAnchorDownload(el);" \
+    "  }, true);" \
+    "  if (window.HTMLAnchorElement) {" \
+    "    var originalAnchorClick = HTMLAnchorElement.prototype.click;" \
+    "    HTMLAnchorElement.prototype.click = function() {" \
+    "      jogetRecordAnchorDownload(this);" \
+    "      return originalAnchorClick.apply(this, arguments);" \
+    "    };" \
+    "    var originalAnchorDispatchEvent = HTMLAnchorElement.prototype.dispatchEvent;" \
+    "    HTMLAnchorElement.prototype.dispatchEvent = function(evt) {" \
+    "      if (evt && evt.type === 'click') { jogetRecordAnchorDownload(this); }" \
+    "      return originalAnchorDispatchEvent.apply(this, arguments);" \
+    "    };" \
+    "  }" \
+    "})();"
 
 #pragma mark CDVWKInAppBrowser
 
@@ -718,6 +763,7 @@ BOOL isExiting = FALSE;
 }
 
 -(void)dealloc {
+    [self.downloadSession invalidateAndCancel];
     //NSLog(@"dealloc");
 }
 
@@ -747,7 +793,15 @@ BOOL isExiting = FALSE;
     configuration.processPool = [[CDVWKProcessPoolFactory sharedFactory] sharedProcessPool];
 #endif
     [configuration.userContentController addScriptMessageHandler:self name:IAB_BRIDGE_NAME];
-    
+
+    // Install the blob-capture hook before any page script runs, so that a client-generated
+    // download (e.g. jsPDF's pdf.save()) can be recovered and saved natively instead of
+    // being shown as an inline preview (iOS WKWebView does not honor <a download> on blob: URLs).
+    WKUserScript* blobHookScript = [[WKUserScript alloc] initWithSource:JOGET_BLOB_HOOK_JS
+                                                           injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                                        forMainFrameOnly:NO];
+    [configuration.userContentController addUserScript:blobHookScript];
+
     //WKWebView options
     configuration.allowsInlineMediaPlayback = _browserOptions.allowinlinemediaplayback;
     if (IsAtLeastiOSVersion(@"10.0")) {
@@ -777,7 +831,7 @@ BOOL isExiting = FALSE;
     [self.view addSubview:self.webView];
     [self.view sendSubviewToBack:self.webView];
     
-    
+    self.webViewUIDelegate.webView = self.webView;
     self.webView.navigationDelegate = self;
     self.webView.UIDelegate = self.webViewUIDelegate;
     self.webView.backgroundColor = [UIColor whiteColor];
@@ -841,7 +895,16 @@ BOOL isExiting = FALSE;
     self.toolbar.opaque = NO;
     self.toolbar.userInteractionEnabled = YES;
     if (_browserOptions.toolbarcolor != nil) { // Set toolbar color if user sets it in options
-      self.toolbar.barTintColor = [self colorFromHexString:_browserOptions.toolbarcolor];
+      UIColor* toolbarColor = [self colorFromHexString:_browserOptions.toolbarcolor];
+      self.toolbar.barTintColor = toolbarColor;
+      // barTintColor alone is ignored on iOS 15+ unless the UIToolbarAppearance proxies are also set
+      UIToolbarAppearance* toolbarAppearance = [[UIToolbarAppearance alloc] init];
+      [toolbarAppearance configureWithOpaqueBackground];
+      toolbarAppearance.backgroundColor = toolbarColor;
+      self.toolbar.standardAppearance = toolbarAppearance;
+      self.toolbar.compactAppearance = toolbarAppearance;
+      self.toolbar.scrollEdgeAppearance = toolbarAppearance;
+      self.toolbar.compactScrollEdgeAppearance = toolbarAppearance;
     }
     if (!_browserOptions.toolbartranslucent) { // Set toolbar translucent to no if user sets it in options
       self.toolbar.translucent = NO;
@@ -1127,7 +1190,7 @@ BOOL isExiting = FALSE;
 - (void)viewWillAppear:(BOOL)animated
 {
     [self rePositionViews];
-    
+
     [super viewWillAppear:animated];
 }
 
@@ -1147,7 +1210,7 @@ BOOL isExiting = FALSE;
     // orientation portrait or portraitUpsideDown: status bar is on the top and web view is to be aligned to the bottom of the status bar
     // orientation landscapeLeft or landscapeRight: status bar height is 0 in but lets account for it in case things ever change in the future
     viewBounds.origin.y = statusBarHeight;
-    
+
     CGFloat leftMargin = [[[UIApplication sharedApplication] delegate] window].safeAreaInsets.left;
     CGFloat rightMargin = [[[UIApplication sharedApplication] delegate] window].safeAreaInsets.right;
     CGFloat screenWidth = [[UIScreen mainScreen] bounds].size.width;
@@ -1184,6 +1247,425 @@ BOOL isExiting = FALSE;
     return [UIColor colorWithRed:((rgbValue & 0xFF0000) >> 16)/255.0 green:((rgbValue & 0xFF00) >> 8)/255.0 blue:(rgbValue & 0xFF)/255.0 alpha:1.0];
 }
 
+// Add download file download support
+#pragma mark Download Support
+
+- (NSString*)getDocumentsDirectory {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *documentsDirectory = [paths firstObject];
+ 
+    // Create a Downloads subdirectory in Documents
+    NSString *downloadsDirectory = [documentsDirectory stringByAppendingPathComponent:@"Downloads"];
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+ 
+    NSError *error = nil;
+    if (![fileManager fileExistsAtPath:downloadsDirectory]) {
+        [fileManager createDirectoryAtPath:downloadsDirectory withIntermediateDirectories:YES attributes:nil error:&error];
+        if (error) {
+            NSLog(@"Failed to create Downloads directory: %@", error.localizedDescription);
+            return documentsDirectory; // Fallback to Documents directory
+        }
+    }
+ 
+    return downloadsDirectory;
+}
+
+// All download-destination selection funnels through this single serial queue so that two downloads racing on different threads 
+static dispatch_queue_t JogetDownloadFileIOQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("org.joget.inappbrowser.downloadFileIO", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+// Claims a filename inside `directory`, rejecting path-traversal tokens outright rather than
+// relying on the incidental fact that "directory/.." always resolves to an existing parent to
+// force the rename branch below. Appends " (1)", " (2)", etc. 
+- (NSString*)reserveUniqueDestinationPathInDirectory:(NSString*)directory forFilename:(NSString*)filename {
+    __block NSString *reservedPath = nil;
+    dispatch_sync(JogetDownloadFileIOQueue(), ^{
+        NSFileManager *fileManager = [NSFileManager defaultManager];
+
+        NSString *safeFilename = filename;
+        if (safeFilename.length == 0 ||
+            [safeFilename isEqualToString:@"."] ||
+            [safeFilename isEqualToString:@".."] ||
+            [safeFilename rangeOfString:@"/"].location != NSNotFound) {
+            safeFilename = [self generateFilename:nil];
+        }
+
+        NSString *destinationPath = [directory stringByAppendingPathComponent:safeFilename];
+        if ([fileManager fileExistsAtPath:destinationPath]) {
+            NSString *baseName = [safeFilename stringByDeletingPathExtension];
+            NSString *extension = [safeFilename pathExtension];
+            NSInteger counter = 1;
+            do {
+                NSString *candidateName = extension.length > 0
+                    ? [NSString stringWithFormat:@"%@ (%ld).%@", baseName, (long)counter, extension]
+                    : [NSString stringWithFormat:@"%@ (%ld)", baseName, (long)counter];
+                destinationPath = [directory stringByAppendingPathComponent:candidateName];
+                counter++;
+            } while ([fileManager fileExistsAtPath:destinationPath]);
+        }
+
+        [fileManager createFileAtPath:destinationPath contents:nil attributes:nil];
+        reservedPath = destinationPath;
+    });
+    return reservedPath;
+}
+
+- (NSString*)generateFilename:(NSString*)mimeType {
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    [formatter setDateFormat:@"yyyyMMdd_HHmmss"];
+    NSString *timestamp = [formatter stringFromDate:[NSDate date]];
+    
+    NSString *extension = @"bin";
+    if ([mimeType isEqualToString:@"application/pdf"]) {
+        extension = @"pdf";
+    } else if ([mimeType isEqualToString:@"image/jpeg"]) {
+        extension = @"jpg";
+    } else if ([mimeType isEqualToString:@"image/png"]) {
+        extension = @"png";
+    } else if ([mimeType hasPrefix:@"text/"]) {
+        extension = @"txt";
+    }
+    
+    return [NSString stringWithFormat:@"download_%@.%@", timestamp, extension];
+}
+
+- (NSString*)extractFileName:(NSString*)contentDisposition {
+    if (contentDisposition == nil) return nil;
+    
+    NSRange filenameRange = [contentDisposition rangeOfString:@"filename="];
+    if (filenameRange.location != NSNotFound) {
+        NSString *filenamePart = [contentDisposition substringFromIndex:filenameRange.location + filenameRange.length];
+        filenamePart = [filenamePart stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\""]];
+        if (filenamePart.length > 0) {
+            return filenamePart;
+        }
+    }
+    return nil;
+}
+
+- (void)downloadFileFromURLWithCookies:(NSURL*)url {
+    NSLog(@"Starting authenticated download from URL: %@", url.absoluteString);
+    
+    // Get cookies from WKWebView to preserve authentication
+    WKHTTPCookieStore *cookieStore = self.webView.configuration.websiteDataStore.httpCookieStore;
+    
+    [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+        
+        // Copy cookies from WKWebView to the download request
+        NSDictionary *headers = [NSHTTPCookie requestHeaderFieldsWithCookies:cookies];
+        for (NSString *key in headers) {
+            [request setValue:headers[key] forHTTPHeaderField:key];
+        }
+        
+        NSLog(@"Added %lu cookies to download request", (unsigned long)cookies.count);
+
+        // Create download session if not exists
+        if (self.downloadSession == nil) {
+            NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
+            configuration.HTTPCookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
+            configuration.HTTPShouldSetCookies = YES;
+            self.downloadSession = [NSURLSession sessionWithConfiguration:configuration
+                                                                 delegate:self
+                                                            delegateQueue:nil];
+        }
+        
+        // Create download task with cookies
+        _currentDownloadTask = [self.downloadSession downloadTaskWithRequest:request];
+        [self showDownloadingToast];
+        [_currentDownloadTask resume];
+    }];
+}
+
+#pragma mark Download Complete Alert
+
+- (void)presentDownloadCompleteAlertForFileAtPath:(NSString*)destinationPath filename:(NSString*)filename {
+    NSURL *fileURL = [NSURL fileURLWithPath:destinationPath];
+
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Download Complete"
+                         message:[NSString stringWithFormat:@"File saved as %@.", filename]
+                  preferredStyle:UIAlertControllerStyleAlert];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"Open"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+        self.documentInteractionController = [UIDocumentInteractionController interactionControllerWithURL:fileURL];
+        self.documentInteractionController.delegate = self;
+        if (![self.documentInteractionController presentPreviewAnimated:YES]) {
+            [self.documentInteractionController presentOptionsMenuFromRect:self.view.bounds
+                                                                   inView:self.view
+                                                                 animated:YES];
+        }
+    }]];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"Close"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)presentDownloadFailedAlertWithMessage:(NSString*)message {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Download Failed"
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+#pragma mark Downloading Toast
+
+- (void)showDownloadingToast {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UILabel *label = [[UILabel alloc] init];
+        label.text = @"Downloading...";
+        label.textColor = [UIColor whiteColor];
+        label.font = [UIFont systemFontOfSize:14];
+        label.textAlignment = NSTextAlignmentCenter;
+
+        UIView *toast = [[UIView alloc] init];
+        toast.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.75];
+        toast.layer.cornerRadius = 16;
+        toast.clipsToBounds = YES;
+        toast.alpha = 0;
+        toast.translatesAutoresizingMaskIntoConstraints = NO;
+        label.translatesAutoresizingMaskIntoConstraints = NO;
+
+        [toast addSubview:label];
+        [self.view addSubview:toast];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [label.topAnchor constraintEqualToAnchor:toast.topAnchor constant:10],
+            [label.bottomAnchor constraintEqualToAnchor:toast.bottomAnchor constant:-10],
+            [label.leadingAnchor constraintEqualToAnchor:toast.leadingAnchor constant:20],
+            [label.trailingAnchor constraintEqualToAnchor:toast.trailingAnchor constant:-20],
+
+            [toast.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+            [toast.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-80]
+        ]];
+
+        [UIView animateWithDuration:0.25 animations:^{
+            toast.alpha = 1;
+        } completion:^(BOOL finished) {
+            [UIView animateWithDuration:0.25 delay:2.0 options:0 animations:^{
+                toast.alpha = 0;
+            } completion:^(BOOL finished2) {
+                [toast removeFromSuperview];
+            }];
+        }];
+    });
+}
+
+#pragma mark WKDownloadDelegate (iOS 14.5+)
+- (void)webView:(WKWebView *)webView navigationResponse:(WKNavigationResponse *)navigationResponse didBecomeDownload:(WKDownload *)download API_AVAILABLE(ios(14.5)) {
+    NSLog(@"WKDownloadDelegate: Download started for URL: %@", navigationResponse.response.URL.absoluteString);
+    download.delegate = self;
+    [self showDownloadingToast];
+}
+
+- (void)download:(WKDownload *)download decideDestinationUsingResponse:(NSURLResponse *)response suggestedFilename:(NSString *)suggestedFilename completionHandler:(void (^)(NSURL * _Nullable destination))completionHandler API_AVAILABLE(ios(14.5)) {
+    NSLog(@"WKDownloadDelegate: Deciding destination for file: %@", suggestedFilename);
+    
+    // Get the app's Documents directory for private storage
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *documentsDirectory = paths.firstObject;
+
+    // Reserve the full file path, renaming to avoid clobbering an existing file of the same name
+    NSString *destinationPath = [self reserveUniqueDestinationPathInDirectory:documentsDirectory forFilename:suggestedFilename];
+    NSURL *destinationURL = [NSURL fileURLWithPath:destinationPath];
+
+    [[NSFileManager defaultManager] removeItemAtPath:destinationPath error:nil];
+
+    // Store the destination URL for later use
+    _wkDownloadDestinationURL = destinationURL;
+    
+    NSLog(@"WKDownloadDelegate: Download destination: %@", destinationPath);
+    completionHandler(destinationURL);
+}
+
+- (void)download:(WKDownload *)download didFailWithError:(NSError *)error API_AVAILABLE(ios(14.5)) {
+    NSLog(@"WKDownloadDelegate: Download failed with error: %@", error.localizedDescription);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Download Failed"
+                                                                       message:error.localizedDescription
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+    });
+}
+
+- (void)download:(WKDownload *)download didReceiveData:(int64_t)bytesWritten totalBytesWritten:(int64_t)totalBytesWritten totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite API_AVAILABLE(ios(14.5)) {
+    NSLog(@"WKDownloadDelegate: Download progress: %lld / %lld bytes", totalBytesWritten, totalBytesExpectedToWrite);
+}
+
+- (void)downloadDidFinish:(WKDownload *)download API_AVAILABLE(ios(14.5)) {
+    NSLog(@"WKDownloadDelegate: Download finished successfully");
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (_wkDownloadDestinationURL) {
+            NSString *filename = [_wkDownloadDestinationURL lastPathComponent];
+            NSString *destinationPath = [_wkDownloadDestinationURL path];
+
+            [self presentDownloadCompleteAlertForFileAtPath:destinationPath filename:filename];
+
+            _wkDownloadDestinationURL = nil;
+        }
+    });
+}
+#pragma mark NSURLSessionDownloadDelegate
+
+- (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)downloadTask
+      didWriteData:(int64_t)bytesWritten
+ totalBytesWritten:(int64_t)totalBytesWritten
+totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite {
+    NSLog(@"Download progress: %lld / %lld bytes", totalBytesWritten, totalBytesExpectedToWrite);
+}
+
+- (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)downloadTask
+didFinishDownloadingToURL:(NSURL *)location {
+    NSLog(@"Download finished to temporary location: %@", location.absoluteString);
+    NSLog(@"Final URL: %@", downloadTask.originalRequest.URL.absoluteString);
+    NSLog(@"Response URL: %@", downloadTask.response.URL.absoluteString);
+    
+    // Check if the download was redirected (possible authentication issue)
+    if (![downloadTask.originalRequest.URL.absoluteString isEqualToString:downloadTask.response.URL.absoluteString]) {
+        NSLog(@"WARNING: Download was redirected from %@ to %@", 
+              downloadTask.originalRequest.URL.absoluteString, 
+              downloadTask.response.URL.absoluteString);
+    }
+    
+    // Check response status code
+    if ([downloadTask.response isKindOfClass:[NSHTTPURLResponse class]]) {
+        NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)downloadTask.response;
+        NSLog(@"HTTP Status Code: %ld", (long)httpResponse.statusCode);
+        
+        if (httpResponse.statusCode != 200) {
+            NSLog(@"ERROR: Download failed with status code %ld", (long)httpResponse.statusCode);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Download Failed"
+                                                                               message:[NSString stringWithFormat:@"Server returned status code %ld. Authentication may be required.", (long)httpResponse.statusCode]
+                                                                        preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                [self presentViewController:alert animated:YES completion:nil];
+            });
+            _currentDownloadTask = nil;
+            return;
+        }
+    }
+    
+    // Check file size
+    NSError *fileError = nil;
+    NSDictionary *fileAttributes = [[NSFileManager defaultManager] attributesOfItemAtPath:location.path error:&fileError];
+    if (fileError == nil) {
+        NSNumber *fileSize = [fileAttributes objectForKey:NSFileSize];
+        NSLog(@"Downloaded file size: %lld bytes", [fileSize longLongValue]);
+        
+        if ([fileSize longLongValue] == 0) {
+            NSLog(@"ERROR: Downloaded file is empty - possible authentication failure");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Download Failed"
+                                                                               message:@"Downloaded file is empty. The download may have failed due to authentication or server error."
+                                                                        preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                [self presentViewController:alert animated:YES completion:nil];
+            });
+            _currentDownloadTask = nil;
+            return;
+        }
+    }
+    
+    // Get filename from response or generate one
+    NSString *filename = [downloadTask.response suggestedFilename];
+    if (filename == nil) {
+        filename = [self generateFilename:nil];
+    }
+    
+    // Reserve a destination in the documents directory, renaming to avoid clobbering an
+    // existing file of the same name
+    NSString *documentsPath = [self getDocumentsDirectory];
+    NSString *destinationPath = [self reserveUniqueDestinationPathInDirectory:documentsPath forFilename:filename];
+
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSError *error = nil;
+
+    // moveItemAtURL: fails if the destination already exists, so release our reservation
+    // placeholder immediately before moving the downloaded file into place.
+    [fileManager removeItemAtPath:destinationPath error:nil];
+    [fileManager moveItemAtURL:location toURL:[NSURL fileURLWithPath:destinationPath] error:&error];
+    
+    if (error) {
+        NSLog(@"Failed to move file: %@", error.localizedDescription);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Download Failed"
+                                                                           message:@"Failed to save the file."
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        });
+    } else {
+        NSLog(@"File saved successfully to: %@", destinationPath);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self presentDownloadCompleteAlertForFileAtPath:destinationPath filename:[destinationPath lastPathComponent]];
+        });
+    }
+
+    _currentDownloadTask = nil;
+}
+
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+    if (error) {
+        NSLog(@"Download failed with error: %@", error.localizedDescription);
+        NSLog(@"Error code: %ld", (long)error.code);
+        NSLog(@"Error domain: %@", error.domain);
+        
+        // Check if it's an authentication error
+        if (error.code == NSURLErrorUserAuthenticationRequired || 
+            error.code == NSURLErrorUserCancelledAuthentication ||
+            [error.localizedDescription containsString:@"authentication"]) {
+            NSLog(@"ERROR: Authentication required for download");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Authentication Required"
+                                                                               message:@"This download requires authentication. Please ensure you are logged in."
+                                                                        preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                [self presentViewController:alert animated:YES completion:nil];
+            });
+        } else {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Download Failed"
+                                                                               message:error.localizedDescription
+                                                                        preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                [self presentViewController:alert animated:YES completion:nil];
+            });
+        }
+    } else {
+        NSLog(@"Download task completed successfully");
+    }
+    _currentDownloadTask = nil;
+}
+
+#pragma mark UIDocumentInteractionControllerDelegate
+ 
+- (UIViewController *)documentInteractionControllerViewControllerForPreview:(UIDocumentInteractionController *)controller {
+    return self;
+}
+ 
+- (UIView *)documentInteractionControllerViewForPreview:(UIDocumentInteractionController *)controller {
+    return self.view;
+}
+ 
+- (CGRect)documentInteractionControllerRectForPreview:(UIDocumentInteractionController *)controller {
+    return self.view.bounds;
+}
+
 #pragma mark WKNavigationDelegate
 
 - (void)webView:(WKWebView *)theWebView didStartProvisionalNavigation:(WKNavigation *)navigation{
@@ -1214,6 +1696,89 @@ BOOL isExiting = FALSE;
     }
     
     [self.navigationDelegate webView:theWebView decidePolicyForNavigationAction:navigationAction decisionHandler:decisionHandler];
+}
+
+- (void)webView:(WKWebView *)theWebView decidePolicyForNavigationResponse:(WKNavigationResponse *)navigationResponse decisionHandler:(void (^)(WKNavigationResponsePolicy))decisionHandler {
+    NSLog(@"Navigation response - MIME type: %@", navigationResponse.response.MIMEType);
+
+    NSString *mimeType = navigationResponse.response.MIMEType;
+
+    // Decide to download based on Content-Disposition header
+    NSString *disposition = nil;
+    if ([navigationResponse.response isKindOfClass:[NSHTTPURLResponse class]]) {
+        disposition = ((NSHTTPURLResponse *)navigationResponse.response).allHeaderFields[@"Content-Disposition"];
+    }
+    BOOL isAttachment = disposition && [disposition.lowercaseString containsString:@"attachment"];
+    
+    if (isAttachment) {
+        NSLog(@"Content-Disposition: attachment — downloading: %@", navigationResponse.response.URL.absoluteString);
+        if (@available(iOS 14.5, *)) {
+            NSLog(@"Detected downloadable file: %@ with MIME type: %@", navigationResponse.response.URL.absoluteString, mimeType);
+            NSLog(@"Using WKDownloadDelegate for authenticated download");
+            decisionHandler(WKNavigationResponsePolicyDownload);
+            return;
+        } else {
+            NSLog(@"Using cookie-based download for iOS < 14.5");
+            decisionHandler(WKNavigationResponsePolicyCancel);
+            [self downloadFileFromURLWithCookies:navigationResponse.response.URL];
+        }
+        return;
+    }
+
+    // Client-generated downloads (e.g. jsPDF's pdf.save()) never hit a real HTTP response, so
+    // they carry no Content-Disposition header - they show up here as a top-level navigation to
+    // a blob: URL instead. WKWebView doesn't honor <a download> for blob: URLs, so without this
+    // it would just render the blob inline (looks like an unwanted "preview"). Recover the
+    // original Blob via the hook installed in createViews and save it natively instead.
+    if ([navigationResponse.response.URL.scheme isEqualToString:@"blob"]) {
+        NSLog(@"Detected blob: URL navigation, treating as a client-generated download: %@", navigationResponse.response.URL.absoluteString);
+        decisionHandler(WKNavigationResponsePolicyCancel);
+        [self showDownloadingToast];
+        [self handleBlobURLDownload:navigationResponse.response.URL mimeType:mimeType];
+        return;
+    }
+
+    // let the webview render inline (preview) if it not an attachment
+    decisionHandler(WKNavigationResponsePolicyAllow);
+
+}
+
+#pragma mark Blob URL Download Support
+
+// Mirrors handleBlobUrlDownload() in InAppBrowserDownloads.java (Android): retrieve the real
+// Blob object captured by the createObjectURL hook, convert it to a base64 data URL in JS, and
+// post it back over the existing cordova_iab bridge for userContentController:didReceiveScriptMessage: to save.
+- (void)handleBlobURLDownload:(NSURL*)blobURL mimeType:(NSString*)mimeType {
+    NSString *safeBlobUrl = [blobURL.absoluteString stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
+    NSString *safeMimeType = mimeType ? [mimeType stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"] : @"";
+
+    NSString *jsCode = [NSString stringWithFormat:@"(function() {"
+        "  function sendError(msg) {"
+        "    webkit.messageHandlers.%@.postMessage(JSON.stringify({action:'blobDownloadError', message: msg}));"
+        "  }"
+        "  if (!window.__jogetBlobStore) { sendError('Blob store not available'); return; }"
+        "  var blobId = window.__jogetBlobStore['%@'];"
+        "  var blob = blobId ? window.__jogetBlobStore[blobId] : null;"
+        "  if (!blob) {"
+        "    var keys = Object.keys(window.__jogetBlobStore).filter(function(k) { return k.indexOf('blob_') === 0; });"
+        "    var latestKey = keys.sort().pop();"
+        "    blob = latestKey ? window.__jogetBlobStore[latestKey] : null;"
+        "  }"
+        "  if (!blob) { sendError('No blob found in store'); return; }"
+        "  var filename = (window.__jogetBlobFilenames && window.__jogetBlobFilenames['%@']) || '';"
+        "  var reader = new FileReader();"
+        "  reader.onloadend = function() {"
+        "    webkit.messageHandlers.%@.postMessage(JSON.stringify({action:'blobDownload', data: reader.result, mimeType: blob.type || '%@', filename: filename}));"
+        "  };"
+        "  reader.onerror = function() { sendError('Blob conversion failed'); };"
+        "  reader.readAsDataURL(blob);"
+        "})();", IAB_BRIDGE_NAME, safeBlobUrl, safeBlobUrl, IAB_BRIDGE_NAME, safeMimeType];
+
+    [self.webView evaluateJavaScript:jsCode completionHandler:^(id result, NSError *error) {
+        if (error != nil) {
+            NSLog(@"handleBlobURLDownload evaluateJavaScript error: %@", error.localizedDescription);
+        }
+    }];
 }
 
 - (void)webView:(WKWebView *)theWebView didFinishNavigation:(WKNavigation *)navigation
@@ -1258,8 +1823,70 @@ BOOL isExiting = FALSE;
     if (![message.name isEqualToString:IAB_BRIDGE_NAME]) {
         return;
     }
+
+    // Handle blob-download messages produced by handleBlobURLDownload: locally - these are
+    // internal to the mobile app and shouldn't be forwarded to the Joget page's message listener.
+    if ([message.body isKindOfClass:[NSString class]]) {
+        NSData* jsonData = [(NSString*)message.body dataUsingEncoding:NSUTF8StringEncoding];
+        NSError* __autoreleasing jsonError = nil;
+        id parsedBody = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&jsonError];
+        if (jsonError == nil && [parsedBody isKindOfClass:[NSDictionary class]]) {
+            NSString* action = ((NSDictionary*)parsedBody)[@"action"];
+            if ([action isEqualToString:@"blobDownload"]) {
+                [self handleBlobDownloadMessage:(NSDictionary*)parsedBody];
+                return;
+            } else if ([action isEqualToString:@"blobDownloadError"]) {
+                NSString* errorMessage = ((NSDictionary*)parsedBody)[@"message"];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self presentDownloadFailedAlertWithMessage:errorMessage ?: @"Unknown error"];
+                });
+                return;
+            }
+        }
+    }
+
     //NSLog(@"Received script message %@", message.body);
     [self.navigationDelegate userContentController:userContentController didReceiveScriptMessage:message];
+}
+
+// Decodes the base64 data URL produced by handleBlobURLDownload:'s injected JS and saves it,
+// using the captured filename when available, else falling back to generateFilename:.
+- (void)handleBlobDownloadMessage:(NSDictionary*)messageDict {
+    NSString* dataUrl = messageDict[@"data"];
+    NSString* mimeType = messageDict[@"mimeType"];
+    if (dataUrl == nil) {
+        return;
+    }
+
+    NSRange commaRange = [dataUrl rangeOfString:@","];
+    NSString* base64String = (commaRange.location != NSNotFound) ? [dataUrl substringFromIndex:commaRange.location + 1] : dataUrl;
+    NSData* fileData = [[NSData alloc] initWithBase64EncodedString:base64String options:NSDataBase64DecodingIgnoreUnknownCharacters];
+
+    if (fileData == nil) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self presentDownloadFailedAlertWithMessage:@"Failed to decode downloaded file."];
+        });
+        return;
+    }
+
+    // Prefer the name captured by the click hook in JOGET_BLOB_HOOK_JS;
+    NSString* suggestedFilename = messageDict[@"filename"];
+    NSString* filename = (suggestedFilename.length > 0) ? [suggestedFilename lastPathComponent] : [self generateFilename:mimeType];
+    NSString* documentsDirectory = [self getDocumentsDirectory];
+    NSString* destinationPath = [self reserveUniqueDestinationPathInDirectory:documentsDirectory forFilename:filename];
+
+    // NSDataWritingAtomic overwrites our reservation placeholder safely, no need to remove it first.
+    NSError* writeError = nil;
+    [fileData writeToFile:destinationPath options:NSDataWritingAtomic error:&writeError];
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (writeError != nil) {
+            NSLog(@"Failed to save blob download: %@", writeError.localizedDescription);
+            [self presentDownloadFailedAlertWithMessage:@"Failed to save the file."];
+        } else {
+            [self presentDownloadCompleteAlertForFileAtPath:destinationPath filename:[destinationPath lastPathComponent]];
+        }
+    });
 }
 
 #pragma mark CDVScreenOrientationDelegate

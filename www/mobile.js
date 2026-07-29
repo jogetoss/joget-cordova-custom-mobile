@@ -474,7 +474,7 @@ var MobileApp = {
         var inAppBrowser = (typeof cordova !== "undefined") ? cordova.InAppBrowser : window;
         var ios = typeof device !== "undefined" && device.platform === "iOS";
         var showLocationBar = (MobileApp.floatingButton && !ios) ? "no" : "yes"; // location bar should always be shown in iOS so that back navigation buttons are available e.g. when viewing images/documents
-        MobileApp.inAppBrowser = inAppBrowser.open(url, "_blank", "clearcache=yes,clearsessioncache=yes,hidden=yes,location=" + showLocationBar + ",toolbar=" + showLocationBar + ",toolbarcolor=#000000,navigationbuttoncolor=#ffffff,closebuttoncolor=#ffffff,closebuttoncaption=X,toolbartranslucent=no,toolbarposition=bottom,hideurlbar=yes,zoom=no");
+        MobileApp.inAppBrowser = inAppBrowser.open(url, "_blank", "clearcache=yes,clearsessioncache=yes,hidden=yes,location=" + showLocationBar + ",toolbar=" + showLocationBar + ",toolbarcolor=#000000,navigationbuttoncolor=#ffffff,closebuttoncaption=X,closebuttoncolor=#ffffff,toolbartranslucent=no,toolbarposition=bottom,hideurlbar=yes,zoom=no");
         if (loginUrl) {
             // perform login
             var callback = function () {
@@ -561,14 +561,9 @@ var MobileApp = {
             });
             console.log("Injected function cordovaAction");
 
-            // update file download links to force attachment download and hide page loader overlay
+            // hide page loader overlay on file download link clicks
             MobileApp.inAppBrowser.executeScript({ code: '\
                 $(".form-fileupload a[target=_blank]").each(function(index, el) { \
-                    var href = $(el).attr("href"); \
-                    if (href.endsWith(".")) { \
-                        href = href + "?attachment=true"; \
-                    } \
-                    $(el).attr("href", href); \
                     $(el).off("click"); \
                     $(el).on("click", function() {  \
                         setTimeout(function() { \
@@ -731,7 +726,7 @@ var MobileApp = {
                     });
                 } else {
                     console.log("Geolocation permission denied");
-                } 
+                }
             });
         } else if (action === "vibration") {
             navigator.vibrate(1000);

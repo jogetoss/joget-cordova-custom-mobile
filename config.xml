@@ -93,9 +93,12 @@
         </edit-config>
     </platform>
     <platform name="ios">
-        <preference name="deployment-target" value="11.0" />
-        <preference name="SwiftVersion" value="5.0" />
+        <preference name="deployment-target" value="16.0" />
+        <preference name="SwiftVersion" value="5.10" />
         <resource-file src="GoogleService-Info.plist" />
+        <edit-config file="*-Info.plist" mode="merge" target="UIDesignRequiresCompatibility">
+            <true/>
+        </edit-config>
         <edit-config file="*-Info.plist" mode="merge" target="NSCameraUsageDescription">
             <string>Need camera access for file uploads</string>
         </edit-config>
@@ -113,6 +116,13 @@
         </edit-config>
         <edit-config file="*-Info.plist" mode="merge" target="NSLocationAlwaysUsageDescription">
             <string>Need location access to determine appropriate region</string>
+        </edit-config>
+        <edit-config file="*-Info.plist" mode="merge" target="UIFileSharingEnabled">
+            <true/>
+        </edit-config>
+
+        <edit-config file="*-Info.plist" mode="merge" target="LSSupportsOpeningDocumentsInPlace">
+            <true/>
         </edit-config>
         <icon height="180" src="res/logo_120x120.png" width="180" />
         <icon height="60" src="res/logo_120x120.png" width="60" />

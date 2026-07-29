@@ -49,10 +49,12 @@
 
 @end
 
-@interface CDVWKInAppBrowserViewController : UIViewController <CDVScreenOrientationDelegate,WKNavigationDelegate,WKUIDelegate,WKScriptMessageHandler,UIAdaptivePresentationControllerDelegate>{
+@interface CDVWKInAppBrowserViewController : UIViewController <CDVScreenOrientationDelegate,WKNavigationDelegate,WKUIDelegate,WKScriptMessageHandler,UIAdaptivePresentationControllerDelegate,NSURLSessionDownloadDelegate,WKDownloadDelegate,UIDocumentInteractionControllerDelegate>{
     @private
     CDVInAppBrowserOptions *_browserOptions;
     NSDictionary *_settings;
+    NSURLSessionDownloadTask *_currentDownloadTask;
+    NSURL *_wkDownloadDestinationURL;
 }
 
 @property (nonatomic, strong) IBOutlet WKWebView* webView;
@@ -68,6 +70,8 @@
 @property (nonatomic, weak) id <CDVScreenOrientationDelegate> orientationDelegate;
 @property (nonatomic, weak) CDVWKInAppBrowser* navigationDelegate;
 @property (nonatomic) NSURL* currentURL;
+@property (nonatomic, strong) NSURLSession* downloadSession;
+@property (nonatomic, strong) UIDocumentInteractionController* documentInteractionController;
 
 - (void)close;
 - (void)navigateTo:(NSURL*)url;
@@ -76,5 +80,13 @@
 - (void)setCloseButtonTitle:(NSString*)title : (NSString*) colorString : (int) buttonIndex;
 
 - (id)initWithBrowserOptions: (CDVInAppBrowserOptions*) browserOptions andSettings:(NSDictionary*) settings;
+- (void)downloadFileFromURLWithCookies:(NSURL*)url;
+- (NSString*)getDocumentsDirectory;
+- (NSString*)generateFilename:(NSString*)mimeType;
+- (NSString*)extractFileName:(NSString*)contentDisposition;
+- (void)handleBlobURLDownload:(NSURL*)blobURL mimeType:(NSString*)mimeType;
+- (void)handleBlobDownloadMessage:(NSDictionary*)messageDict;
+- (void)presentDownloadCompleteAlertForFileAtPath:(NSString*)destinationPath filename:(NSString*)filename;
+- (void)presentDownloadFailedAlertWithMessage:(NSString*)message;
 
 @end
