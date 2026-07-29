@@ -88,9 +88,12 @@ import android.app.Activity;
 import android.Manifest;
 import android.os.Environment;
 import android.provider.MediaStore;
+import android.provider.OpenableColumns;
 import android.util.Log;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.FileOutputStream;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import android.webkit.DownloadListener;
@@ -162,7 +165,9 @@ public class InAppBrowser extends CordovaPlugin {
     private boolean fullscreen = true;
     private String[] allowedSchemes;
     private InAppBrowserClient currentClient;
-    private String mCM;
+    // CUSTOM: separate paths so a photo capture and a video capture don't clobber each other
+    private String mPhotoCapturePath;
+    private String mVideoCapturePath;
     private PermissionRequest permissionRequest;
     private static final int CAMERA_REQ_CODE = 124;
 
@@ -951,40 +956,119 @@ public class InAppBrowser extends CordovaPlugin {
                         }
                         mUploadCallback = filePathCallback;
 
-                        Intent takePictureIntent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+                        // CUSTOM: clear any stale capture paths from a previous chooser invocation,
+                        // deleting the backing files - they live in getFilesDir() now, which the OS
+                        // never auto-cleans, so we're responsible for our own leftovers.
+                        deleteCapturedFileQuietly(mPhotoCapturePath);
+                        deleteCapturedFileQuietly(mVideoCapturePath);
+                        mPhotoCapturePath = null;
+                        mVideoCapturePath = null;
 
-                        if(takePictureIntent.resolveActivity(cordova.getActivity().getPackageManager()) != null) {
+                        // Check what file types are accepted from the HTML input field
+                        String[] acceptTypes = fileChooserParams.getAcceptTypes();
+                        Log.d(LOG_TAG, "Accept types: " + Arrays.toString(acceptTypes));
+                        boolean acceptImages = false;
+                        boolean acceptVideos = false;
 
-                            File photoFile = null;
-                            try {
-                                photoFile = createImageFile();
-                                takePictureIntent.putExtra("PhotoPath", mCM);
-                            } catch(IOException ex) {
-                                Log.e(LOG_TAG, "Image file creation failed", ex);
-                            }
-                            if(photoFile != null) {
-                                mCM = "file:" + photoFile.getAbsolutePath();
-                                Uri uri = null;
-                                try {
-                                    // FileProvider already defined by Cordova (.cdv.core.file.provider)
-                                    uri = FileProvider.getUriForFile(cordova.getContext(), cordova.getActivity().getPackageName() + ".cdv.core.file.provider", photoFile);
-                                    Log.d(LOG_TAG, "FileProvider URI created successfully ");
-                                } catch (Exception e) {
-                                    // TODO: handle exception
-                                    Log.d(LOG_TAG, "FileProvider failed",e);
+                        if (acceptTypes != null && acceptTypes.length > 0) {
+                            for (String type : acceptTypes) {
+                                if (type.startsWith("image/")) {
+                                    acceptImages = true;
+                                } else if (type.startsWith("video/")) {
+                                    acceptVideos = true;
+                                } else if (type.equals("*/*") || type.isEmpty()) {
+                                    // Accepts all types, enable both
+                                    acceptImages = true;
+                                    acceptVideos = true;
                                 }
-                                takePictureIntent.putExtra(MediaStore.EXTRA_OUTPUT, uri);
+                            }
+                        } else {
+                            // No accept attribute specified, enable both by default
+                            acceptImages = true;
+                            acceptVideos = true;
+                        }
+
+                        // Only create picture intent if images are accepted
+                        Intent takePictureIntent = null;
+                        //if true, create intent to take a picture
+                        if (acceptImages) {
+                            takePictureIntent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+                            if(takePictureIntent.resolveActivity(cordova.getActivity().getPackageManager()) != null) {
+
+                                File photoFile = null;
+                                try {
+                                    photoFile = createImageFile();
+                                    takePictureIntent.putExtra("PhotoPath", mPhotoCapturePath);
+                                } catch(IOException ex) {
+                                    Log.e(LOG_TAG, "Image file creation failed", ex);
+                                }
+                                if(photoFile != null) {
+                                    mPhotoCapturePath = "file:" + photoFile.getAbsolutePath();
+                                    Uri uri = null;
+                                    try {
+                                        // FileProvider already defined by Cordova (.cdv.core.file.provider)
+                                        uri = FileProvider.getUriForFile(cordova.getContext(), cordova.getActivity().getPackageName() + ".cdv.core.file.provider", photoFile);
+                                        Log.d(LOG_TAG, "FileProvider URI created successfully ");
+                                    } catch (Exception e) {
+                                        // TODO: handle exception
+                                        Log.d(LOG_TAG, "FileProvider failed",e);
+                                    }
+                                    takePictureIntent.putExtra(MediaStore.EXTRA_OUTPUT, uri);
+                                } else {
+                                    takePictureIntent = null;
+                                }
                             } else {
                                 takePictureIntent = null;
                             }
                         }
+
+                        // Only create video intent if videos are accepted
+                        Intent videoIntent = null;
+                        if (acceptVideos) {
+                            videoIntent = new Intent(android.provider.MediaStore.ACTION_VIDEO_CAPTURE);
+                            if(videoIntent.resolveActivity(cordova.getActivity().getPackageManager()) != null) {
+
+                                File videoFile = null;
+                                try {
+                                    videoFile = createVideoFile();
+                                    videoIntent.putExtra("VideoPath", mVideoCapturePath);
+                                } catch(IOException ex) {
+                                    Log.e(LOG_TAG, "Video file creation failed", ex);
+                                }
+
+                                if(videoFile != null) {
+                                    mVideoCapturePath = "file:" + videoFile.getAbsolutePath();
+                                    Uri uri = null;
+                                    try {
+                                        uri = FileProvider.getUriForFile(cordova.getContext(), cordova.getActivity().getPackageName() + ".cdv.core.file.provider", videoFile);
+                                        Log.d(LOG_TAG, "FileProvider URI created successfully ");
+                                    } catch (Exception e) {
+                                        // TODO: handle exception
+                                        Log.d(LOG_TAG, "FileProvider failed",e);
+                                    }
+                                    videoIntent.putExtra(MediaStore.EXTRA_OUTPUT, uri);
+                                } else {
+                                    videoIntent = null;
+                                }
+                            } else {
+                                videoIntent = null;
+                            }
+                        }
+
                         // Create File Chooser Intent
                         Intent contentSelectionIntent = new Intent(Intent.ACTION_GET_CONTENT);
                         contentSelectionIntent.addCategory(Intent.CATEGORY_OPENABLE);
                         contentSelectionIntent.setType("*/*");
+                        contentSelectionIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                         Intent[] intentArray;
-                        if (takePictureIntent != null) {
+
+                        // Build intent array based on which intents were successfully created
+                        if (takePictureIntent != null && videoIntent != null) {
+                            intentArray = new Intent[] { videoIntent, takePictureIntent };
+                        } else if (takePictureIntent != null) {
                             intentArray = new Intent[] { takePictureIntent };
+                        } else if (videoIntent != null) {
+                            intentArray = new Intent[] { videoIntent };
                         } else {
                             intentArray = new Intent[0];
                         }
@@ -992,6 +1076,7 @@ public class InAppBrowser extends CordovaPlugin {
                         Intent chooserIntent = new Intent(Intent.ACTION_CHOOSER);
                         chooserIntent.putExtra(Intent.EXTRA_INTENT, contentSelectionIntent);
                         // chooserIntent.putExtra(Intent.EXTRA_TITLE, "Select Option");
+                        chooserIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                         chooserIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, intentArray);
 
                         // Run cordova startActivityForResult
@@ -1117,10 +1202,8 @@ public class InAppBrowser extends CordovaPlugin {
                     dialog.hide();
                 }
                 // CUSTOM: File download support
-                if (InAppBrowser.this.downloads == null) {
-                    InAppBrowser.this.downloads = new InAppBrowserDownloads(InAppBrowser.this, inAppWebView);
-                }
-                
+                // NOTE: a new inAppWebView is created on every open() call (e.g. profile switch),
+                InAppBrowser.this.downloads = new InAppBrowserDownloads(InAppBrowser.this, inAppWebView);
                 inAppWebView.setDownloadListener(InAppBrowser.this.downloads);
                 // END CUSTOM
             }
@@ -1133,10 +1216,63 @@ public class InAppBrowser extends CordovaPlugin {
     private File createImageFile() throws IOException {
         @SuppressLint("SimpleDateFormat") String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
         String imageFileName = "img_"+timeStamp+"_";
-        // use cache dir, follow with how cordova store image
-        File storageDir = cordova.getActivity().getCacheDir();
+        // CUSTOM: use getFilesDir(), not getCacheDir() - the OS is free to clear cache dir
+        // contents at any time (e.g. under storage pressure while a large video is recording),
+        // which caused capture files to disappear between capture and upload (ENOENT).
+        File storageDir = cordova.getActivity().getFilesDir();
         return File.createTempFile(imageFileName,".jpg",storageDir);
     }
+
+    // CUSTOM: Video upload support
+    private File createVideoFile() throws IOException {
+        @SuppressLint("SimpleDateFormat") String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+        String videoFileName = "vid_"+timeStamp+"_";
+        // CUSTOM: use getFilesDir(), not getCacheDir() - see createImageFile() above
+        File storageDir = cordova.getActivity().getFilesDir();
+        return File.createTempFile(videoFileName,".mp4",storageDir);
+    }
+
+    // CUSTOM: Determine which capture (photo or video) the camera actually wrote to
+    private String resolveCapturedMediaPath() {
+        String photoPath = filePathFromCaptureUri(mPhotoCapturePath);
+        String videoPath = filePathFromCaptureUri(mVideoCapturePath);
+
+        if (photoPath != null) {
+            File photoFile = new File(photoPath);
+            if (photoFile.exists() && photoFile.length() > 0) {
+                return mPhotoCapturePath;
+            }
+        }
+        if (videoPath != null) {
+            File videoFile = new File(videoPath);
+            if (videoFile.exists() && videoFile.length() > 0) {
+                return mVideoCapturePath;
+            }
+        }
+        return null;
+    }
+
+    private String filePathFromCaptureUri(String captureUri) {
+        if (captureUri == null) {
+            return null;
+        }
+        Uri uri = Uri.parse(captureUri);
+        return uri.getPath();
+    }
+
+    // CUSTOM: remove a previous capture's backing file now that capture files live in
+    // getFilesDir() instead of getCacheDir() (the OS no longer cleans these up for us)
+    private void deleteCapturedFileQuietly(String captureUriString) {
+        String path = filePathFromCaptureUri(captureUriString);
+        if (path == null) {
+            return;
+        }
+        File file = new File(path);
+        if (file.exists() && !file.delete()) {
+            Log.d(LOG_TAG, "Failed to delete stale capture file: " + path);
+        }
+    }
+
 
     // CUSTOM: File download support & camera grant resources onRequestPermissionsResult
     public void onRequestPermissionResult(int requestCode, String[] permissions, int[] grantResults) throws JSONException {
@@ -1193,6 +1329,57 @@ public class InAppBrowser extends CordovaPlugin {
     }
 
     /**
+     * Copy content:// URI to temporary file for upload
+     *
+     * @param contentUri The content:// URI to copy
+     * @return A file:// URI pointing to the temporary file, or null if failed
+     */
+    private Uri copyContentUriToTempFile(Uri contentUri) {
+        try {
+            // Query the content URI for the original filename
+            String fileName = "upload_" + System.currentTimeMillis();
+            android.database.Cursor cursor = cordova.getActivity().getContentResolver().query(
+                contentUri,
+                new String[]{OpenableColumns.DISPLAY_NAME},
+                null,
+                null,
+                null
+            );
+            if (cursor != null && cursor.moveToFirst()) {
+                int nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (nameIndex >= 0) {
+                    fileName = cursor.getString(nameIndex);
+                }
+                cursor.close();
+            }
+
+            InputStream inputStream = cordova.getActivity().getContentResolver().openInputStream(contentUri);
+            File cacheDir = cordova.getActivity().getCacheDir();
+            File tempFile = new File(cacheDir, fileName);
+            FileOutputStream outputStream = new FileOutputStream(tempFile);
+            byte[] buffer = new byte[4096];
+            int bytesRead;
+            while ((bytesRead = inputStream.read(buffer)) != -1) {
+                outputStream.write(buffer, 0, bytesRead);
+            }
+            outputStream.close();
+            inputStream.close();
+            
+            // Grant URI permission for the temp file
+            Uri tempUri = FileProvider.getUriForFile(
+                cordova.getContext(), 
+                cordova.getActivity().getPackageName() + ".cdv.core.file.provider", 
+                tempFile
+            );
+            Log.d(LOG_TAG, "Successfully copied content URI to temp file: " + tempUri + " with original name: " + fileName);
+            return tempUri;
+        } catch (Exception e) {
+            Log.e(LOG_TAG, "Failed to copy content URI to temp file", e);
+            return null;
+        }
+    }
+
+    /**
      * Receive File Data from File Chooser
      *
      * @param requestCode the requested code from chromeclient
@@ -1214,14 +1401,39 @@ public class InAppBrowser extends CordovaPlugin {
                         return;
                     }
                     if(intent == null || intent.getData() == null){
-                        //Capture Photo if no image available
-                        if(mCM != null){
-                            results = new Uri[]{Uri.parse(mCM)};
+                        String capturedPath = resolveCapturedMediaPath();
+                        if(capturedPath != null){
+                            results = new Uri[]{Uri.parse(capturedPath)};
                         }
-                    }else{
+                        //handle google drive that uses clipData
+                        else if (intent != null && intent.getClipData() != null) {
+                            int count = intent.getClipData().getItemCount();
+                            Uri[] clipDataResults = new Uri[count];
+                            for (int i = 0; i < count; i++) {
+                                Uri clipUri = intent.getClipData().getItemAt(i).getUri();
+                                LOG.d(LOG_TAG, "ClipData URI " + i + ": " + clipUri);
+                                if ("content".equals(clipUri.getScheme())) {
+                                    Uri tempUri = copyContentUriToTempFile(clipUri);
+                                    clipDataResults[i] = tempUri != null ? tempUri : clipUri;
+                                } else {
+                                    clipDataResults[i] = clipUri;
+                                }
+                            }
+                            results = clipDataResults;
+                        }
+                    }
+                    else{
                         String dataString = intent.getDataString();
                         if(dataString != null){
-                            results = new Uri[]{Uri.parse(dataString)};
+                            Uri dataUri = Uri.parse(dataString);
+                            if ("content".equals(dataUri.getScheme())) {
+                                Uri tempUri = copyContentUriToTempFile(dataUri);
+                                if (tempUri != null) {
+                                    results = new Uri[]{tempUri};
+                                }
+                            } else {
+                                results = new Uri[]{dataUri};
+                            }
                         }
                     }
                 }
@@ -1470,6 +1682,18 @@ public class InAppBrowser extends CordovaPlugin {
         @Override
         public void onPageStarted(WebView view, String url, Bitmap favicon) {
             super.onPageStarted(view, url, favicon);
+
+            //  Inject blob hook JS to fetch blob URLs for download
+            if (downloads != null) {
+                String blobHookJs = downloads.getBlobHookJavaScript();
+                view.evaluateJavascript(blobHookJs, new ValueCallback<String>() {
+                    @Override
+                    public void onReceiveValue(String value) {
+                        Log.d(LOG_TAG, "Blob hook with ID-based storage injected: " + value);
+                    }
+                });
+            }
+
             String newloc = "";
             if (url.startsWith("http:") || url.startsWith("https:") || url.startsWith("file:")) {
                 newloc = url;

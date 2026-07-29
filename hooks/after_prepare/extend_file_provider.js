@@ -22,8 +22,12 @@ module.exports = function (ctx) {
 
   const hasCachePath = xml.includes('<cache-path');
   const hasExternalPath = xml.includes('<external-path');
+  // CUSTOM: camera/video capture temp files live in getFilesDir() (not getCacheDir(), which the
+  // OS is free to clear at any time, e.g. under storage pressure while a large video is being
+  // recorded) - this path entry lets FileProvider resolve those URIs.
+  const hasFilesPath = xml.includes('<files-path');
 
-  if (!hasCachePath || !hasExternalPath) {
+  if (!hasCachePath || !hasExternalPath || !hasFilesPath) {
     let injection = '';
 
     //add cache & external-path in cdv_core_file_provider_paths.xml
@@ -35,12 +39,16 @@ module.exports = function (ctx) {
       injection += `\n    <external-path name="external_files" path="." />`;
     }
 
+    if (!hasFilesPath) {
+      injection += `\n    <files-path name="files" path="." />`;
+    }
+
     xml = xml.replace('</paths>', `${injection}\n</paths>`);
 
     fs.writeFileSync(filePath, xml, 'utf8');
 
-    console.log('\x1b[32m%s\x1b[0m', '[Hook] Injected cache and external paths into cdv_core_file_provider_paths.xml');
+    console.log('\x1b[32m%s\x1b[0m', '[Hook] Injected cache, external and files paths into cdv_core_file_provider_paths.xml');
   } else {
-    console.log('\x1b[33m%s\x1b[0m', '[Hook] cache-path and external-path already exist, skipping injection.');
+    console.log('\x1b[33m%s\x1b[0m', '[Hook] cache-path, external-path and files-path already exist, skipping injection.');
   }
 };
