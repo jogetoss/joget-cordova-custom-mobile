@@ -22,9 +22,9 @@
     <preference name="hostname" value="localhost" />
     <preference name="AndroidInsecureFileModeEnabled" value="true" />
     <preference name="AndroidPersistentFileLocation" value="Compatibility" />
-    <preference name="GradlePluginKotlinVersion" value="1.9.24"/>
-    <preference name="GradleVersion" value="8.13" />
-    <preference name="AndroidGradlePluginVersion" value="8.7.3" />
+    <preference name="GradlePluginKotlinVersion" value="2.1.21"/>
+    <preference name="GradleVersion" value="8.14.2" />
+    <preference name="AndroidGradlePluginVersion" value="8.10.1" />
     <hook type="after_prepare" src="hooks/after_prepare/extend_file_provider.js" />
     <feature name="StatusBar">
         <param name="ios-package" onload="true" value="CDVStatusBar" />
@@ -36,9 +36,9 @@
         <resource-file src="res/xml/file_paths.xml" target="app/src/main/res/xml/file_paths.xml" />
         <resource-file src="res/icon.png" target="app/src/main/res/drawable/icon.png" />
         <preference name="android-minSdkVersion" value="24" />
-        <preference name="android-compileSdkVersion" value="35" />
-        <preference name="android-targetSdkVersion" value="35" />
-        <preference name="android-buildToolsVersion" value="35.0.0" />
+        <preference name="android-compileSdkVersion" value="36" />
+        <preference name="android-targetSdkVersion" value="36" />
+        <preference name="android-buildToolsVersion" value="36.0.0" />
         <preference name="AndroidXEnabled" value="true" />
         <preference name="SplashScreen" value="screen" />
         <preference name="AutoHideSplashScreen" value="true" />

@@ -16,22 +16,22 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Set up Gradle 8.13
+      - name: Set up Gradle 8.14.2
         uses: gradle/actions/setup-gradle@v3
         with:
-          gradle-version: 8.13
+          gradle-version: 8.14.2
 
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: 20.5.0
+          node-version: 20.17.0
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v2
         
-      - name: Install Android SDK Build Tools 35.0.0
+      - name: Install Android SDK Build Tools 36.0.0
         run: |
-          sdkmanager "build-tools;35.0.0" "platforms;android-35"
+          sdkmanager "build-tools;36.0.0" "platforms;android-36"
   
       - name: Import Android keystore and Google services JSON
         env:
@@ -46,7 +46,7 @@ jobs:
         run: npm install -g cordova
 
       - name: Add Cordova Android platform
-        run: cordova platform add android@14.0.0
+        run: cordova platform add android@15.0.0
 
       - name: Add cordova-plugin-androidx-adapter
         run: cordova plugin add cordova-plugin-androidx-adapter@1.1.3
