@@ -71,7 +71,7 @@ jobs:
         run: npm install -g cordova
 
       - name: Add Cordova iOS platform
-        run: cordova platform add ios@8.1.0
+        run: cordova platform add ios@7.1.0
 
       - name: Add custom cordova-plugin-inappbrowser
         run: cordova plugin add ./cordova-plugin-inappbrowser-download
